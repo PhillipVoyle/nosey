@@ -11,18 +11,24 @@
 #include <algorithm>
 
 #ifdef _WIN32
+#include <WinSock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "Ws2_32.lib")
+typedef int socklen_t;
 #else
 #include <poll.h>
+#include <sys/socket.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <unistd.h>
-#endif
 
 typedef int SOCKET;
 const SOCKET INVALID_SOCKET = -1;
+#endif
 
 class connection;
 
@@ -146,7 +152,10 @@ public:
 
         pollfd selector;
         selector.fd = connection_;
-        selector.events = POLLIN | POLLERR | POLLRDHUP | POLLHUP;
+        selector.events = POLLIN | POLLERR | POLLHUP;
+#ifndef _WIN32
+        selector.events |= POLLRDHUP
+#endif
         selector.revents = 0;
         
         if (!write_queue_.empty())
@@ -162,7 +171,7 @@ public:
 
         //todo: receive always ready?
         uint8_t io_buffer[256];
-        int nr = recv(connection_, io_buffer, sizeof(io_buffer), 0);
+        int nr = recv(connection_, (char*)io_buffer, sizeof(io_buffer), 0);
         if (nr > 0)
         {
             on_recv_(io_buffer, nr);
@@ -174,7 +183,11 @@ public:
             on_disconnect_();
             return;
         }
+#ifdef _WIN32
+        else if (WSAGetLastError() != WSAEWOULDBLOCK)
+#else
         else if ((errno != EAGAIN) && (errno != EWOULDBLOCK))
+#endif
         {
             cleanup();
             on_disconnect_();
@@ -187,14 +200,18 @@ public:
             {
                 io_buffer[n] = write_queue_[n];
             }
-            int ns = ::send(connection_, io_buffer, n, 0);
+            int ns = ::send(connection_, (char*) io_buffer, n, 0);
             if (ns > 0)
             {
                 write_queue_.erase(
                     write_queue_.begin(),
                     write_queue_.begin() + ns);
             }
+#ifdef _WIN32
+            else if (WSAGetLastError() != WSAEWOULDBLOCK)
+#else
             else if ((errno != EAGAIN) && (errno != EWOULDBLOCK))
+#endif
             {
                 cleanup();
                 on_disconnect_();
@@ -282,7 +299,10 @@ public:
 
         pollfd selector;
         selector.fd = connection_;
-        selector.events = POLLIN | POLLERR | POLLRDHUP | POLLHUP;
+        selector.events = POLLIN | POLLERR | POLLHUP;
+#ifndef _WIN32
+        selector.events |= POLLRDHUP
+#endif 
         selector.revents = 0;
         
         if (!write_queue_.empty() || connecting_)
@@ -305,12 +325,20 @@ public:
             if (connecting_)
             {
                 int r = ::connect(connection_, (sockaddr*) &far_end, sizeof(sockaddr_in));
+#ifdef _WIN32
+                if (WSAGetLastError() == WSAEISCONN)
+#else
                 if ((r == 0) || (errno == EISCONN))
+#endif
                 {
                     connecting_ = false;
                     on_connect_();
                 }
+#ifdef _WIN32
+                else if (WSAGetLastError() == WSAEWOULDBLOCK)
+#else
                 else if ((errno == EAGAIN) || (errno == EALREADY) || (errno == EINPROGRESS) || (errno == EWOULDBLOCK))
+#endif
                 {
                     return;
                 }
@@ -539,8 +567,11 @@ void run_listener(SOCKET fd, const sockaddr_in& connect_addr)
         {
             connection->prepare_for_poll(descriptors);
         }
-
+#ifdef _WIN32
+        WSAPoll(descriptors.data(), descriptors.size(), 1000);
+#else
         poll(descriptors.data(), descriptors.size(), 1000);
+#endif
         for(auto& connection : connections)
         {
             connection->poll();
@@ -681,17 +712,38 @@ int main(int argc, char** argv)
         return -1;
     }
 
+#ifdef _WIN32
+    WORD wVersionRequested;
+    WSADATA wsaData;
+    wVersionRequested = MAKEWORD(2, 2);
+
+    int err = WSAStartup(wVersionRequested, &wsaData);
+    if (err != 0) {
+        printf("WSAStartup failed with error: %d\n", err);
+        return 1;
+    }
+#endif
+
     sockaddr_in listen_addr = { 0 }, connect_addr = { 0 };
     listen_addr.sin_family = AF_INET;
     listen_addr.sin_port = htons(listen_port);
     connect_addr.sin_family = AF_INET;
     connect_addr.sin_port = htons(connect_port);
 
-    int r = inet_aton(listen_address.c_str(), &listen_addr.sin_addr);  
+#ifdef _WIN32
+    int r = InetPtonA(AF_INET, listen_address.c_str(), &listen_addr.sin_addr);
+#else
+    int r = inet_aton(listen_address.c_str(), &listen_addr.sin_addr);
+#endif
+
     if (r == 0)
         std::cerr << "invalid address: " << listen_address << std::endl;
 
-    r = inet_aton(connect_address.c_str(), &connect_addr.sin_addr);  
+#ifdef _WIN32
+    r = InetPtonA(AF_INET, connect_address.c_str(), &connect_addr.sin_addr);
+#else
+    r = inet_aton(connect_address.c_str(), &connect_addr.sin_addr);
+#endif
     if (r == 0)
         std::cerr << "invalid address: " << connect_address << std::endl;
 
@@ -720,5 +772,6 @@ int main(int argc, char** argv)
     }
 
     cleanup_socket(fd);
+    WSACleanup();
     return 0;
 }
