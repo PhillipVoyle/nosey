@@ -154,7 +154,7 @@ public:
         selector.fd = connection_;
         selector.events = POLLIN | POLLERR | POLLHUP;
 #ifndef _WIN32
-        selector.events |= POLLRDHUP
+        selector.events |= POLLRDHUP;
 #endif
         selector.revents = 0;
         
@@ -301,7 +301,7 @@ public:
         selector.fd = connection_;
         selector.events = POLLIN | POLLERR | POLLHUP;
 #ifndef _WIN32
-        selector.events |= POLLRDHUP
+        selector.events |= POLLRDHUP;
 #endif 
         selector.revents = 0;
         
@@ -772,6 +772,8 @@ int main(int argc, char** argv)
     }
 
     cleanup_socket(fd);
+#ifdef _WIN32
     WSACleanup();
+#endif
     return 0;
 }
